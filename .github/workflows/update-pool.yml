@@ -1,0 +1,38 @@
+
+name: Update IP Pool
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - results.txt
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  update-pool:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Merge IP results
+        run: python scripts/update_pool.py
+
+      - name: Commit updated pool
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add pool.txt
+          if ! git diff --cached --quiet; then
+            git commit -m "Update accumulated IP pool"
+            git push
+          fi
