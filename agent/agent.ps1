@@ -11,7 +11,8 @@
 param(
     [string]$Config = '',
     [switch]$Force,
-    [switch]$SelfTest
+    [switch]$SelfTest,
+    [string]$SourceFile = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -327,7 +328,11 @@ $stateFile = Join-Path $scriptDir 'state.json'
 $exitCode = 0
 
 try {
-    if ($sourceMode -eq 'api') {
+    if ($SourceFile) {
+        $uri = $SourceFile
+        if (-not (Test-Path -LiteralPath $SourceFile)) { throw "来源文件不存在：$SourceFile" }
+        Write-Log "使用本地来源文件：$SourceFile"
+    } elseif ($sourceMode -eq 'api') {
         $uri = "https://api.github.com/repos/$repo/contents/${inboxPath}?ref=${branch}"
         $headers = @{
             Authorization = "Bearer $token"
@@ -341,15 +346,19 @@ try {
 
     Write-Log "检查来源：$uri"
     $content = ''
-    try {
-        $content = Invoke-RestMethod -Uri $uri -Headers $headers -Method Get -TimeoutSec 60
-    } catch {
-        $status = $null
-        if ($_.Exception.Response) { $status = [int]$_.Exception.Response.StatusCode }
-        if ($status -eq 404) {
-            $content = ''
-        } else {
-            throw "下载来源失败（$status）：$($_.Exception.Message)"
+    if ($SourceFile) {
+        $content = [IO.File]::ReadAllText($SourceFile)
+    } else {
+        try {
+            $content = Invoke-RestMethod -Uri $uri -Headers $headers -Method Get -TimeoutSec 60
+        } catch {
+            $status = $null
+            if ($_.Exception.Response) { $status = [int]$_.Exception.Response.StatusCode }
+            if ($status -eq 404) {
+                $content = ''
+            } else {
+                throw "下载来源失败（$status）：$($_.Exception.Message)"
+            }
         }
     }
     if ($null -eq $content) { $content = '' }
@@ -378,10 +387,10 @@ try {
     $runList = New-Object 'System.Collections.Generic.List[string]'
     $runList.AddRange($argList)
     if ($sourceMode -eq 'api') {
-        $sourceFile = Join-Path $tempDir 'source-ips.txt'
-        [IO.File]::WriteAllText($sourceFile, (($lines -join "`n") + "`n"), (New-Object Text.UTF8Encoding($false)))
+        $tempSourceFile = Join-Path $tempDir 'source-ips.txt'
+        [IO.File]::WriteAllText($tempSourceFile, (($lines -join "`n") + "`n"), (New-Object Text.UTF8Encoding($false)))
         $runList.Add('-nsbfile')
-        $runList.Add($sourceFile)
+        $runList.Add($tempSourceFile)
     } else {
         $runList.Add('-nsbsourceurl')
         $runList.Add($sourceUrl)
@@ -481,7 +490,9 @@ try {
 
         $msg = @()
         if ($cfdataExit -ne 0) { $msg += ('⚠️ cfdata 异常退出，退出码 {0}' -f $cfdataExit) }
-        $msg += ('📊 本轮测速完成 · ' + (Get-Date -Format 'MM-dd HH:mm'))
+        $headerText = '📊 本轮测速完成 · ' + (Get-Date -Format 'MM-dd HH:mm')
+        if ($SourceFile) { $headerText = '🔁 手动重测 · ' + (Get-Date -Format 'MM-dd HH:mm') }
+        $msg += $headerText
         $msg += ('条件：延迟 ≤ {0}ms · 速度 ≥ {1}MB/s · 并发 {2}' -f (Format-Number $pDelay), (Format-Number $pSpeedMin), $pSpeedThreads)
         $msg += ''
         $msg += ('来源 {0} 个 → 链路可用 {1} 个 → 实际测速 {2} 个' -f $summaryInput, $summaryRelink, $summarySpeed)
@@ -529,8 +540,12 @@ try {
         Write-Log "cfdata 退出码 $cfdataExit，本轮不记录来源状态"
         $exitCode = 1
     } else {
-        $stateObject = [ordered]@{ hash = $hash; lastRun = (Get-Date).ToString('s'); source = $uri }
-        [IO.File]::WriteAllText($stateFile, ($stateObject | ConvertTo-Json), (New-Object Text.UTF8Encoding($false)))
+        if ($SourceFile) {
+            Write-Log '手动重测，不更新来源状态'
+        } else {
+            $stateObject = [ordered]@{ hash = $hash; lastRun = (Get-Date).ToString('s'); source = $uri }
+            [IO.File]::WriteAllText($stateFile, ($stateObject | ConvertTo-Json), (New-Object Text.UTF8Encoding($false)))
+        }
         Write-Log '本轮完成'
     }
 } catch {
