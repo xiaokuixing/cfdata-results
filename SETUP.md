@@ -55,7 +55,7 @@ Set-Content "$env:USERPROFILE\.cfdata-results\gh-token.txt" "github_pat_xxxxxxxx
 | `WEBHOOK_SECRET` | Secret | 自己随便生成一串，比如 32 位随机字符 |
 | `GH_PATH` | Text | 可省略，默认 `shared-ips.txt` |
 | `GH_BRANCH` | Text | 可省略，默认 `main` |
-| `CF_ONLY` | Text | 可省略，默认 `true`（只收 Cloudflare 官方网段） |
+| `GH_PATH_OTHER` | Text | 可省略，默认 `shared-ips-other.txt`（非 CF 网段的 IP 存这里） |
 | `DEFAULT_PORTS` | Text | 可省略，默认 `443`（消息里没写端口时用） |
 | `MAX_LINES` | Text | 可省略，默认 `200`（`shared-ips.txt` 只保留最新这么多条） |
 
@@ -77,6 +77,13 @@ Invoke-RestMethod -Method Post `
 6. 给 bot 发 `/id`，确认能收到回复；再转发一条带 IP 的群消息，应该回复「已收录 N 个新 IP」。
 
 `shared-ips.txt` 采用**新 IP 在前**的写入方式，这样 cfdata 会优先测到最近分享的节点。
+
+消息里的 IP 会按网段自动分流：
+
+- Cloudflare 网段 → `shared-ips.txt`，走完整的自动测速流程
+- 其他网段 → `shared-ips-other.txt`，只收集不自动测（cfdata 的链路复验探针和测速源都是 CF 的，非 CF 的 IP 测了也过不了，混进 `pool.txt` 还会让节点不可用）
+
+bot 的回复会分别告诉你两边各收录了多少。
 
 ## 4. 配置本地 agent
 
@@ -197,6 +204,7 @@ https://github.com/xiaokuixing/cfdata-results/blob/main/results.txt
 | 文件 | 作用 |
 | --- | --- |
 | `shared-ips.txt` | bot 收集的原始 IP，新的在前 |
+| `shared-ips-other.txt` | bot 收集到的非 CF 网段 IP，只存不测 |
 | `results.txt` | 每次 cfdata 测速后覆盖写入的合格结果 |
 | `pool.txt` | 历史累积池（你正在用的文件） |
 | `worker/worker.js` | Telegram → GitHub 收集端 |
