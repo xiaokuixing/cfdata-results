@@ -1,22 +1,26 @@
 {
-    "repo":  "xiaokuixing/cfdata-results",
-    "branch":  "main",
-    "inboxPath":  "shared-ips.txt",
-    "uploadPath":  "results.txt",
-    "sourceMode":  "api",
-    "cfdataExe":  "C:\\Tools\\cfdata\\cfdata-windows-amd64.exe",
-    "tokenFile":  "%USERPROFILE%\\.cfdata-results\\gh-token.txt",
-    "proxy":  "",
-    "sourceUrl":  "",
-    "timeoutMinutes":  30,
-    "params":  {
-                   "threads":  100,
-                   "speedThreads":  1,
-                   "speedMin":  10,
-                   "speedLimit":  10,
-                   "resultLimit":  500,
-                   "delay":  0,
-                   "tls":  true,
-                   "relink":  true
-               }
+  "repo": "xiaokuixing/cfdata-results",
+  "branch": "main",
+  "inboxPath": "shared-ips.txt",
+  "uploadPath": "results.txt",
+  "sourceMode": "api",
+  "cfdataExe": "D:\\cfdata\\cfdata-agent\\cfdata.exe",
+  "tokenFile": "%USERPROFILE%\\.cfdata-results\\gh-token.txt",
+  "telegramTokenFile": "%USERPROFILE%\\.cfdata-results\\bot-token.txt",
+  "telegramChatId": "123456789",
+  "telegramProxy": "",
+  "notify": true,
+  "proxy": "",
+  "sourceUrl": "",
+  "timeoutMinutes": 90,
+  "params": {
+    "threads": 100,
+    "speedThreads": 1,
+    "speedMin": 10,
+    "speedLimit": 100,
+    "resultLimit": 200,
+    "delay": 350,
+    "tls": true,
+    "relink": true
+  }
 }
