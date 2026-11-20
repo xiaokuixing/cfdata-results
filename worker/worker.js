@@ -319,34 +319,53 @@ async function handleMessage(env, message) {
     .split(",")
     .map((item) => Number(item.trim()))
     .filter((item) => Number.isInteger(item) && item > 0 && item <= 65535);
+  const ports = defaultPorts.length ? defaultPorts : [443];
 
-  const cfOnly = String(env.CF_ONLY || "true").toLowerCase() !== "false";
-  const parsed = extractEndpoints(text, defaultPorts.length ? defaultPorts : [443]);
-  const accepted = parsed.filter((endpoint) => {
-    if (!cfOnly) return true;
-    return endpoint.v6 ? isCloudflareV6(endpoint.host) : isCloudflareV4(endpoint.host);
-  });
-
-  if (!accepted.length) {
-    await reply(env, chatId, `没找到可用 IP（解析到 ${parsed.length} 个，${cfOnly ? "非 Cloudflare 已过滤" : "格式无效"}）。`);
+  const parsed = extractEndpoints(text, ports);
+  if (!parsed.length) {
+    await reply(env, chatId, "没找到可用 IP（格式无效或端口不对）。");
     return;
   }
 
-  const capped = accepted.slice(0, 200);
-  const path = repoPath(env);
+  const isCF = (endpoint) => (endpoint.v6 ? isCloudflareV6(endpoint.host) : isCloudflareV4(endpoint.host));
+  const cfList = parsed.filter(isCF).slice(0, 200);
+  const otherList = parsed.filter((endpoint) => !isCF(endpoint)).slice(0, 200);
+
+  const cfPath = repoPath(env);
+  const otherPath = env.GH_PATH_OTHER || "shared-ips-other.txt";
+  const cfResult = await mergeEndpoints(env, cfPath, cfList, ports);
+  const otherResult = await mergeEndpoints(env, otherPath, otherList, ports);
+
+  const lines = [];
+  if (cfList.length) {
+    lines.push(cfResult.fresh > 0
+      ? `CF 段：收录 ${cfResult.fresh} 个新 IP（${cfPath}）`
+      : `CF 段：这 ${cfList.length} 个都已经在 ${cfPath} 里了`);
+  }
+  if (otherList.length) {
+    lines.push(otherResult.fresh > 0
+      ? `非 CF：收录 ${otherResult.fresh} 个（${otherPath}，不参与自动测速）`
+      : `非 CF：这 ${otherList.length} 个都已经在 ${otherPath} 里了`);
+  }
+
+  const sampleList = cfResult.freshList.length ? cfResult.freshList : otherResult.freshList;
+  if (sampleList.length) {
+    const sampleText = sampleList.slice(0, 5).map(formatEndpoint).join("\n");
+    const more = sampleList.length > 5 ? `\n… 共 ${sampleList.length} 个` : "";
+    lines.push(sampleText + more);
+  }
+
+  await reply(env, chatId, lines.join("\n"));
+}
+
+async function mergeEndpoints(env, path, endpoints, ports) {
+  if (!endpoints.length) return { fresh: 0, freshList: [] };
 
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const file = await githubGet(env, path);
-    const existing = new Set(
-      extractEndpoints(file.text, defaultPorts.length ? defaultPorts : [443])
-        .map(endpointKey)
-    );
-    const fresh = capped.filter((endpoint) => !existing.has(endpointKey(endpoint)));
-
-    if (!fresh.length) {
-      await reply(env, chatId, `这 ${capped.length} 个 IP 都已经在 ${path} 里了。`);
-      return;
-    }
+    const existing = new Set(extractEndpoints(file.text, ports).map(endpointKey));
+    const fresh = endpoints.filter((endpoint) => !existing.has(endpointKey(endpoint)));
+    if (!fresh.length) return { fresh: 0, freshList: [] };
 
     const appended = fresh.map(formatEndpoint).join("\n") + "\n";
     const old = file.text.replace(/^\uFEFF/, "").trimEnd();
@@ -355,18 +374,16 @@ async function handleMessage(env, message) {
     if (Number.isInteger(maxLines) && maxLines > 0 && mergedLines.length > maxLines) {
       mergedLines = mergedLines.slice(0, maxLines);
     }
-    const content = mergedLines.join("\n") + "\n";
 
     try {
-      await githubPut(env, path, content, file.sha, `tg: add ${fresh.length} ip(s)`);
-      const sample = fresh.slice(0, 5).map(formatEndpoint).join("\n");
-      const more = fresh.length > 5 ? `\n… 共 ${fresh.length} 个` : "";
-      await reply(env, chatId, `已收录 ${fresh.length} 个新 IP（${path}）\n${sample}${more}`);
-      return;
+      await githubPut(env, path, mergedLines.join("\n") + "\n", file.sha, `tg: add ${fresh.length} ip(s)`);
+      return { fresh: fresh.length, freshList: fresh };
     } catch (error) {
       if (attempt === 1) throw error;
     }
   }
+
+  return { fresh: 0, freshList: [] };
 }
 
 export default {
