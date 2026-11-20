@@ -195,7 +195,38 @@ https://github.com/xiaokuixing/cfdata-results/blob/main/results.txt
 - 所以：测速那会儿代理开着就能立刻收到；没开的那轮，等你开代理后会补上。
 
 单轮最长运行 `timeoutMinutes`（默认 90 分钟），超时会被强制结束并记一条 ⚠️ 汇报。计划任务每 10 分钟触发一次，上一轮没跑完时这一轮直接跳过。
-## 8. 排错
+## 8. 重测指定 IP
+
+想单独重测几个 IP（不改 `shared-ips.txt`）：
+
+1. 打开 `D:\cfdata\cfdata-agent\retest.txt`，一行一个填进去（`#` 开头是注释）：
+
+```
+162.159.160.28:443
+104.16.148.10 443
+```
+
+2. 双击 `D:\cfdata\cfdata-agent\retest.cmd`。
+
+或者命令行：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File D:\cfdata\cfdata-agent\agent.ps1 -Force -SourceFile D:\cfdata\cfdata-agent\retest.txt
+```
+
+行为说明：
+
+- 用的是同一套测速参数；合格的照样由 cfdata 上传 `results.txt`，再由 Action 合并进 `pool.txt`
+- 汇报开头会标 `🔁 手动重测`，速度列表和平时一样
+- 不会更新 `state.json`，所以不会影响定时任务对"来源有没有变化"的判断
+- 重测变慢不会拖累 `pool.txt`：`update_pool.py` 对同一个地址只保留历史最高速度
+
+想把 `shared-ips.txt` 里的全部 IP 整体重测一遍，直接用 `-Force`：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File D:\cfdata\cfdata-agent\agent.ps1 -Force
+```
+## 9. 排错
 
 - **bot 不回消息**：先访问 Worker 地址，返回 `cfdata telegram inbox worker` 说明 Worker 正常；再检查 webhook 是否指向正确地址、`WEBHOOK_SECRET` 是否和 `setWebhook` 一致。
 - **回复「未配置 ALLOWED_USER_IDS」**：环境变量没生效，或 user id 填错。
@@ -206,7 +237,7 @@ https://github.com/xiaokuixing/cfdata-results/blob/main/results.txt
 - **cfdata 报 `flag provided but not defined`**：本地 cfdata 版本太旧，升级到最新 Release 再试（需要支持 `-nsbsourceurl`、`-github`、`-skipgeo`）。
 - **cfdata 上传了但 pool 没变**：检查 Action 是否成功、`results.txt` 是否真的被覆盖；只有合格结果才会被上传。
 
-## 9. 文件说明
+## 10. 文件说明
 
 | 文件 | 作用 |
 | --- | --- |
@@ -218,3 +249,4 @@ https://github.com/xiaokuixing/cfdata-results/blob/main/results.txt
 | `agent/agent.ps1` | 本地增量测速 |
 | `agent/agent.config.example.json` | 参数模板 |
 | `agent/install-task.ps1` | 注册/删除计划任务 |
+| `agent/retest.txt` / `agent/retest.cmd` | 手动重测指定 IP |
