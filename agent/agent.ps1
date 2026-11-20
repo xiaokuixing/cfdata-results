@@ -185,12 +185,89 @@ function Send-TelegramMessage {
     return $false
 }
 
+function Send-WorkerReport {
+    param([string]$Text, [string]$ChatId)
+    if (-not $notifyUrl) { return $false }
+    if (-not (Test-Path -LiteralPath $notifySecretFile)) { return $false }
+    $secret = (Get-Content -LiteralPath $notifySecretFile -Raw).Trim()
+    if (-not $secret) { return $false }
+
+    $body = @{ chatId = $ChatId; text = $Text } | ConvertTo-Json -Depth 3
+    $bytes = [Text.Encoding]::UTF8.GetBytes($body)
+    $uri = $notifyUrl.TrimEnd('/') + '/notify'
+
+    $routes = New-Object System.Collections.Generic.List[string]
+    $routes.Add('')
+    $added = 0
+    foreach ($candidate in @(Get-LocalProxyCandidates)) {
+        if ($added -ge 3) { break }
+        $routes.Add($candidate)
+        $added += 1
+    }
+
+    $lastError = ''
+    foreach ($route in $routes) {
+        try {
+            $request = @{
+                Uri = $uri
+                Method = 'Post'
+                Headers = @{ 'X-Notify-Secret' = $secret }
+                ContentType = 'application/json; charset=utf-8'
+                Body = $bytes
+                TimeoutSec = 8
+            }
+            if ($route) { $request['Proxy'] = $route }
+            Invoke-RestMethod @request | Out-Null
+            if ($route) { Write-Log ("汇报已通过 Worker 发送（代理 $route）") }
+            else { Write-Log '汇报已通过 Worker 发送（直连）' }
+            return $true
+        } catch {
+            $lastError = $_.Exception.Message
+        }
+    }
+    Write-Log ('Worker 汇报失败：' + $lastError)
+    return $false
+}
+
+function Queue-RepoReport {
+    param([string]$Text, [string]$ChatId)
+    try {
+        $file = Get-RepoFile -Path $queuePath
+        $items = @()
+        if ($file.Text -and $file.Text.Trim() -ne '') {
+            try {
+                $existing = $file.Text | ConvertFrom-Json
+                $existingItems = Get-RawValue $existing 'items'
+                if ($existingItems) { $items = @($existingItems) }
+            } catch { $items = @() }
+        }
+        $entry = [ordered]@{
+            id = [guid]::NewGuid().ToString('N')
+            chatId = $ChatId
+            text = $Text
+            at = (Get-Date).ToString('s')
+        }
+        $items = @($items) + @($entry)
+        if ($items.Count -gt 10) { $items = @($items | Select-Object -Last 10) }
+        $json = [ordered]@{ items = $items } | ConvertTo-Json -Depth 6
+        Set-RepoFile -Path $queuePath -Text ($json + "`n") -Sha $file.Sha -Message 'agent: queue telegram report'
+        Write-Log '汇报已写入 GitHub 队列，等待 Worker 定时转发'
+        return $true
+    } catch {
+        Write-Log ('写入 GitHub 汇报队列失败：' + $_.Exception.Message)
+        return $false
+    }
+}
+
 function Send-Report {
-    param([string]$Text)
-    if (-not $telegramChatId) { return $false }
+    param([string]$Text, [string]$ChatId = '')
+    if (-not $ChatId) { $ChatId = $telegramChatId }
+    if (-not $ChatId) { return $false }
+    if (Send-WorkerReport -Text $Text -ChatId $ChatId) { return $true }
+    if (Queue-RepoReport -Text $Text -ChatId $ChatId) { return $true }
     if (-not (Test-Path -LiteralPath $telegramTokenFile)) { return $false }
     $token = (Get-Content -LiteralPath $telegramTokenFile -Raw).Trim()
-    return Send-TelegramMessage -Token $token -ChatId $telegramChatId -Text $Text -ProxyList (Get-LocalProxyCandidates)
+    return Send-TelegramMessage -Token $token -ChatId $ChatId -Text $Text -ProxyList (Get-LocalProxyCandidates)
 }
 
 function Save-PendingReport {
@@ -224,6 +301,92 @@ function Send-PendingReports {
     }
 }
 
+function ConvertTo-RepoPath {
+    param([string]$Path)
+    return (($Path -split '/') | ForEach-Object { [uri]::EscapeDataString($_) }) -join '/'
+}
+
+function Get-RepoFile {
+    param([string]$Path)
+    $url = 'https://api.github.com/repos/{0}/contents/{1}?ref={2}' -f $repo, (ConvertTo-RepoPath $Path), $branch
+    $headers = @{
+        Authorization = "Bearer $token"
+        Accept = 'application/vnd.github+json'
+        'User-Agent' = 'cfdata-agent'
+    }
+    try {
+        $data = Invoke-RestMethod -Uri $url -Headers $headers -Method Get -TimeoutSec 30
+    } catch {
+        $status = $null
+        if ($_.Exception.Response) { $status = [int]$_.Exception.Response.StatusCode }
+        if ($status -eq 404) { return [pscustomobject]@{ Text = ''; Sha = '' } }
+        throw
+    }
+    $text = ''
+    if ($data.content) {
+        $clean = ([string]$data.content) -replace '\s', ''
+        $text = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($clean))
+    }
+    return [pscustomobject]@{ Text = $text; Sha = [string]$data.sha }
+}
+
+function Set-RepoFile {
+    param([string]$Path, [string]$Text, [string]$Sha, [string]$Message)
+    $url = 'https://api.github.com/repos/{0}/contents/{1}' -f $repo, (ConvertTo-RepoPath $Path)
+    $headers = @{
+        Authorization = "Bearer $token"
+        Accept = 'application/vnd.github+json'
+        'User-Agent' = 'cfdata-agent'
+    }
+    $payload = [ordered]@{
+        message = $Message
+        content = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Text))
+        branch = $branch
+    }
+    if ($Sha) { $payload['sha'] = $Sha }
+    $body = $payload | ConvertTo-Json -Compress
+    Invoke-RestMethod -Uri $url -Headers $headers -Method Put -ContentType 'application/json; charset=utf-8' -Body $body -TimeoutSec 30 | Out-Null
+}
+
+function Complete-RetestRequest {
+    param([string]$Id, [string]$Status)
+    if (-not $Id) { return }
+    try {
+        $file = Get-RepoFile -Path $commandPath
+        $currentId = ''
+        if ($file.Text -and $file.Text.Trim() -ne '') {
+            try { $currentId = [string](Get-RawValue ($file.Text | ConvertFrom-Json) 'id') } catch { $currentId = '' }
+        }
+        if ($currentId -and $currentId -ne $Id) {
+            Write-Log ("检测到更新的重测请求 {0}，保留不覆盖" -f $currentId)
+            return
+        }
+        $body = ([ordered]@{ id = $Id; status = $Status; doneAt = (Get-Date).ToString('s') } | ConvertTo-Json -Compress)
+        Set-RepoFile -Path $commandPath -Text ($body + "`n") -Sha $file.Sha -Message ("tg: retest {0} {1}" -f $Id, $Status)
+        Write-Log ("重测请求 {0} 已标记为 {1}" -f $Id, $Status)
+    } catch {
+        Write-Log ('标记重测请求失败：' + $_.Exception.Message)
+    }
+}
+
+function Save-AgentState {
+    param([string]$Hash, [string]$Source, [string]$RequestId)
+    $object = [ordered]@{}
+    if ($state) {
+        foreach ($property in $state.PSObject.Properties) { $object[$property.Name] = $property.Value }
+    }
+    if ($Hash) {
+        $object['hash'] = $Hash
+        $object['lastRun'] = (Get-Date).ToString('s')
+    }
+    if ($Source) { $object['source'] = $Source }
+    if ($RequestId) {
+        $object['lastRequestId'] = $RequestId
+        $object['lastRetestAt'] = (Get-Date).ToString('s')
+    }
+    [IO.File]::WriteAllText($stateFile, ($object | ConvertTo-Json), (New-Object Text.UTF8Encoding($false)))
+}
+
 if (-not (Test-Path -LiteralPath $Config)) {
     throw "找不到配置文件：$Config（先复制 agent.config.example.json 为 agent.config.json 再修改）"
 }
@@ -233,6 +396,7 @@ $cfg = Get-Content -LiteralPath $Config -Raw -Encoding UTF8 | ConvertFrom-Json
 $repo = Get-Str $cfg 'repo' 'xiaokuixing/cfdata-results'
 $branch = Get-Str $cfg 'branch' 'main'
 $inboxPath = Get-Str $cfg 'inboxPath' 'shared-ips.txt'
+$commandPath = Get-Str $cfg 'commandPath' 'agent/retest-request.json'
 $uploadPath = Get-Str $cfg 'uploadPath' 'results.txt'
 $sourceMode = (Get-Str $cfg 'sourceMode' 'api').ToLowerInvariant()
 $exe = [Environment]::ExpandEnvironmentVariables((Get-Str $cfg 'cfdataExe' ''))
@@ -248,6 +412,9 @@ $notify = (Get-Str $cfg 'notify' 'true').ToLowerInvariant() -ne 'false'
 $telegramTokenFile = [Environment]::ExpandEnvironmentVariables((Get-Str $cfg 'telegramTokenFile' '%USERPROFILE%\.cfdata-results\bot-token.txt'))
 $telegramChatId = Get-Str $cfg 'telegramChatId' ''
 $telegramProxy = Get-Str $cfg 'telegramProxy' ''
+$notifyUrl = Get-Str $cfg 'notifyUrl' ''
+$notifySecretFile = [Environment]::ExpandEnvironmentVariables((Get-Str $cfg 'notifySecretFile' '%USERPROFILE%\.cfdata-results\notify-secret.txt'))
+$queuePath = Get-Str $cfg 'queuePath' 'agent/report-queue.json'
 $params = Get-RawValue $cfg 'params'
 
 $argList = New-Object 'System.Collections.Generic.List[string]'
@@ -327,6 +494,54 @@ $tempDir = Join-Path $env:TEMP ('cfdata-agent-' + [guid]::NewGuid().ToString('N'
 $stateFile = Join-Path $scriptDir 'state.json'
 $exitCode = 0
 
+$state = $null
+if (Test-Path -LiteralPath $stateFile) {
+    try { $state = Get-Content -LiteralPath $stateFile -Raw -Encoding UTF8 | ConvertFrom-Json } catch { $state = $null }
+}
+
+$reportChatId = $telegramChatId
+$retestRequestId = ''
+
+if (-not $SourceFile) {
+    try {
+        $requestFile = Get-RepoFile -Path $commandPath
+        if ($requestFile.Text -and $requestFile.Text.Trim() -ne '') {
+            $request = $null
+            try { $request = $requestFile.Text | ConvertFrom-Json } catch { $request = $null }
+            if ($null -eq $request) {
+                Write-Log '重测请求不是合法 JSON，忽略'
+            } else {
+                $requestId = [string](Get-RawValue $request 'id')
+                $requestStatus = [string](Get-RawValue $request 'status')
+                $lastRequestId = [string](Get-RawValue $state 'lastRequestId')
+                if ($requestStatus -eq 'done') {
+                    # 已处理过的请求，不再重复
+                } elseif (-not $requestId -or $requestId -eq $lastRequestId) {
+                    # 同一个请求，已在跑或已跑完
+                } else {
+                    $requestEndpoints = New-Object System.Collections.Generic.List[string]
+                    foreach ($item in @(Get-RawValue $request 'endpoints')) {
+                        $endpoint = ([string]$item).Trim()
+                        if ($endpoint) { $requestEndpoints.Add($endpoint) }
+                    }
+                    if ($requestEndpoints.Count -eq 0) {
+                        Write-Log ("重测请求 {0} 里没有可用 IP，忽略" -f $requestId)
+                    } else {
+                        $retestRequestId = $requestId
+                        $requestChatId = [string](Get-RawValue $request 'chatId')
+                        if ($requestChatId) { $reportChatId = $requestChatId }
+                        $SourceFile = Join-Path $env:TEMP ('cfdata-request-{0}.txt' -f ($requestId -replace '[^0-9A-Za-z_-]', ''))
+                        [IO.File]::WriteAllText($SourceFile, (($requestEndpoints -join "`n") + "`n"), (New-Object Text.UTF8Encoding($false)))
+                        Write-Log ("收到 Telegram 重测请求 {0}：{1} 个 IP，汇报到 {2}" -f $requestId, $requestEndpoints.Count, $reportChatId)
+                    }
+                }
+            }
+        }
+    } catch {
+        Write-Log ('检查重测请求失败：' + $_.Exception.Message)
+    }
+}
+
 try {
     if ($SourceFile) {
         $uri = $SourceFile
@@ -371,12 +586,8 @@ try {
     }
 
     $hash = Get-ContentHash ($lines -join "`n")
-    $state = $null
-    if (Test-Path -LiteralPath $stateFile) {
-        try { $state = Get-Content -LiteralPath $stateFile -Raw -Encoding UTF8 | ConvertFrom-Json } catch { $state = $null }
-    }
     $lastHash = Get-RawValue $state 'hash'
-    if (-not $Force -and $lastHash -eq $hash) {
+    if (-not $Force -and -not $retestRequestId -and $lastHash -eq $hash) {
         Write-Log '来源没有变化，跳过'
         exit 0
     }
@@ -477,7 +688,7 @@ try {
     $uploadMatch = [regex]::Match($output, '\[github\]\s+uploaded\s+(\S+)')
     $summaryUploaded = $uploadMatch.Success
 
-    if ($notify -and $telegramChatId -and (Test-Path -LiteralPath $telegramTokenFile)) {
+    if ($notify -and $reportChatId -and (Test-Path -LiteralPath $telegramTokenFile)) {
         $pDelay = Get-Num $params 'delay' 0
         $pSpeedMin = Get-Num $params 'speedMin' 0.1
         $pSpeedThreads = Get-Num $params 'speedThreads' 0
@@ -491,7 +702,8 @@ try {
         $msg = @()
         if ($cfdataExit -ne 0) { $msg += ('⚠️ cfdata 异常退出，退出码 {0}' -f $cfdataExit) }
         $headerText = '📊 本轮测速完成 · ' + (Get-Date -Format 'MM-dd HH:mm')
-        if ($SourceFile) { $headerText = '🔁 手动重测 · ' + (Get-Date -Format 'MM-dd HH:mm') }
+        if ($retestRequestId) { $headerText = '🔁 重测完成（来自 Telegram）· ' + (Get-Date -Format 'MM-dd HH:mm') }
+        elseif ($SourceFile) { $headerText = '🔁 手动重测 · ' + (Get-Date -Format 'MM-dd HH:mm') }
         $msg += $headerText
         $msg += ('条件：延迟 ≤ {0}ms · 速度 ≥ {1}MB/s · 并发 {2}' -f (Format-Number $pDelay), (Format-Number $pSpeedMin), $pSpeedThreads)
         $msg += ''
@@ -529,8 +741,8 @@ try {
 
         $msgText = ($msg -join "`n")
         if ($msgText.Length -gt 4000) { $msgText = $msgText.Substring(0, 4000) }
-        if (Send-Report $msgText) {
-            Write-Log '已发送 Telegram 通知'
+        if (Send-Report -Text $msgText -ChatId $reportChatId) {
+            Write-Log '汇报已交付（Worker 直发或队列转发）'
         } else {
             Save-PendingReport $msgText
         }
@@ -539,19 +751,39 @@ try {
     if ($cfdataExit -ne 0) {
         Write-Log "cfdata 退出码 $cfdataExit，本轮不记录来源状态"
         $exitCode = 1
+        if ($retestRequestId) {
+            Complete-RetestRequest -Id $retestRequestId -Status 'failed'
+            Save-AgentState -RequestId $retestRequestId
+        }
     } else {
-        if ($SourceFile) {
+        if ($SourceFile -and -not $retestRequestId) {
             Write-Log '手动重测，不更新来源状态'
         } else {
-            $stateObject = [ordered]@{ hash = $hash; lastRun = (Get-Date).ToString('s'); source = $uri }
-            [IO.File]::WriteAllText($stateFile, ($stateObject | ConvertTo-Json), (New-Object Text.UTF8Encoding($false)))
+            if ($retestRequestId) { Complete-RetestRequest -Id $retestRequestId -Status 'done' }
+            if ($SourceFile) {
+                Save-AgentState -RequestId $retestRequestId
+            } else {
+                Save-AgentState -Hash $hash -Source $uri -RequestId $retestRequestId
+            }
         }
         Write-Log '本轮完成'
     }
 } catch {
     Write-Log ("出错：" + $_.Exception.Message)
     $exitCode = 1
+    if ($retestRequestId) {
+        Complete-RetestRequest -Id $retestRequestId -Status 'failed'
+        Save-AgentState -RequestId $retestRequestId
+        if ($notify -and $reportChatId) {
+            $failText = ('⚠️ 重测失败 · {0}' -f (Get-Date -Format 'MM-dd HH:mm')) + "`n" + $_.Exception.Message
+            if ($failText.Length -gt 3500) { $failText = $failText.Substring(0, 3500) }
+            if (-not (Send-Report -Text $failText -ChatId $reportChatId)) { Save-PendingReport $failText }
+        }
+    }
 } finally {
+    if ($retestRequestId -and $SourceFile -and (Test-Path -LiteralPath $SourceFile)) {
+        Remove-Item -LiteralPath $SourceFile -Force -ErrorAction SilentlyContinue
+    }
     if (Test-Path -LiteralPath $tempDir) { Remove-Item -LiteralPath $tempDir -Recurse -Force -ErrorAction SilentlyContinue }
     $mutex.ReleaseMutex()
     $mutex.Dispose()
