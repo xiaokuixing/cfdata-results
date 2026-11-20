@@ -25,6 +25,7 @@
     "resultLimit": 200,
     "delay": 350,
     "tls": true,
-    "relink": true
+    "relink": false,
+    "relinkHost": "probe.609909.xyz"
   }
 }
