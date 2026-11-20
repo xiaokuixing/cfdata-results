@@ -1,10 +1,4 @@
 {
-  "items": [
-    {
-      "id": "test-mwp4jqqi",
-      "chatId": "8176265509",
-      "text": "✅ 队列转发测试：收到这条说明 GitHub Actions → Worker → Telegram 链路正常，且不需要本地代理。",
-      "at": "2026-11-20T15:18:58.842Z"
-    }
-  ]
+  "items": [],
+  "updatedAt": "2026-11-20T15:19:56.464Z"
 }
