@@ -428,6 +428,8 @@ Add-Arg $argList '-nsbresultlimit' (Get-Num $params 'resultLimit' 500)
 Add-Arg $argList '-nsbdelay' (Get-Num $params 'delay' 0)
 Add-BoolArg $argList '-nsbtls' (Get-RawValue $params 'tls')
 Add-BoolArg $argList '-relink' (Get-RawValue $params 'relink')
+$relinkHost = Get-Str $params 'relinkHost' ''
+if ($relinkHost) { Add-Arg $argList '-relinkhost' $relinkHost }
 
 Add-Arg $argList '-out' 'cfdata-run'
 Add-Arg $argList '-outformat' 'txt'
@@ -623,6 +625,7 @@ try {
         $psi.WorkingDirectory = $tempDir
         $psi.UseShellExecute = $false
         $psi.CreateNoWindow = $true
+        $psi.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
         $psi.RedirectStandardOutput = $true
         $psi.RedirectStandardError = $true
         $psi.StandardOutputEncoding = [Text.Encoding]::UTF8
