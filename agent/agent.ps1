@@ -319,7 +319,7 @@ if (-not $mutex.WaitOne(0)) {
     Write-Log '上一轮还在运行，跳过本轮'
     exit 0
 }
-if ($notify) { Send-PendingReports }
+if ($notify) { try { Send-PendingReports } catch { Write-Log ('补发汇报出错：' + $_.Exception.Message) } }
 
 
 $tempDir = Join-Path $env:TEMP ('cfdata-agent-' + [guid]::NewGuid().ToString('N'))
