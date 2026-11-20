@@ -1,1 +1,13 @@
-{"id":"mwp55emk-37","status":"done","doneAt":"2026-11-20T23:36:53"}
+{
+  "id": "relinktest-mwp5dquv",
+  "createdAt": "2026-11-20T15:42:18.679Z",
+  "chatId": 8176265509,
+  "messageId": 0,
+  "userId": 8176265509,
+  "endpoints": [
+    "162.159.160.28:443",
+    "104.16.148.10:443",
+    "172.67.66.177:443"
+  ],
+  "rawText": "relink off test"
+}
