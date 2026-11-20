@@ -350,7 +350,12 @@ async function handleMessage(env, message) {
 
     const appended = fresh.map(formatEndpoint).join("\n") + "\n";
     const old = file.text.replace(/^\uFEFF/, "").trimEnd();
-    const content = old ? `${appended}${old}\n` : appended;
+    const maxLines = Number(env.MAX_LINES || 200);
+    let mergedLines = (old ? `${appended}${old}` : appended).split("\n").filter((line) => line.trim() !== "");
+    if (Number.isInteger(maxLines) && maxLines > 0 && mergedLines.length > maxLines) {
+      mergedLines = mergedLines.slice(0, maxLines);
+    }
+    const content = mergedLines.join("\n") + "\n";
 
     try {
       await githubPut(env, path, content, file.sha, `tg: add ${fresh.length} ip(s)`);
