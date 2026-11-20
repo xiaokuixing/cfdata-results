@@ -5,13 +5,18 @@
 再由仓库现有的 Action 合并进 `pool.txt`。
 
 ```
-TG 转发 → Worker → shared-ips.txt
-                        │  GitHub API 下载后以 -nsbfile 交给 cfdata
-                        ▼
-            本地 cfdata 非标优选（条件见第 6 节）
-                        │  cfdata -github 上传
-                        ▼
-                  results.txt ──Action──▶ pool.txt
+TG 转发 IP ──▶ Worker ──▶ shared-ips.txt
+                              │  GitHub API 下载后以 -nsbfile 交给 cfdata
+                              ▼
+                  本地 cfdata 非标优选（条件见第 6 节）
+                              │  cfdata -github 上传
+                              ▼
+                        results.txt ──Action──▶ pool.txt
+
+TG 发「重测 + IP」──▶ Worker ──▶ agent/retest-request.json
+                              │  本机 agent 每分钟取一次
+                              ▼
+                   同一套 cfdata 测速 → 汇报发回 Telegram
 ```
 
 - 收集端（Worker）只做提取、去重、写文件，不测速。
@@ -58,6 +63,9 @@ Set-Content "$env:USERPROFILE\.cfdata-results\gh-token.txt" "github_pat_xxxxxxxx
 | `GH_PATH_OTHER` | Text | 可省略，默认 `shared-ips-other.txt`（非 CF 网段的 IP 存这里） |
 | `DEFAULT_PORTS` | Text | 可省略，默认 `443`（消息里没写端口时用） |
 | `MAX_LINES` | Text | 可省略，默认 `200`（`shared-ips.txt` 只保留最新这么多条） |
+| `NOTIFY_SECRET` | Secret | 本地 agent 回传测速汇报用的密钥，随便生成一串 32 位以上随机字符 |
+| `GH_CMD_PATH` | Text | 可省略，默认 `agent/retest-request.json`（重测请求文件） |
+| `GH_QUEUE_PATH` | Text | 可省略，默认 `agent/report-queue.json`（汇报队列文件） |
 
 4. 记下 Worker 地址，例如 `https://cfdata-inbox.xxx.workers.dev`。
 5. 注册 webhook：
@@ -114,10 +122,10 @@ powershell -ExecutionPolicy Bypass -File .\agent\agent.ps1 -Force
 ## 5. 注册定时任务
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\agent\install-task.ps1 -Minutes 10
+powershell -ExecutionPolicy Bypass -File .\agent\install-task.ps1 -Minutes 1
 ```
 
-- 默认每 10 分钟检查一次；`shared-ips.txt` 没变化时只发一个请求就退出。
+- 默认每 1 分钟检查一次；`shared-ips.txt` 没变化时只发一个请求就退出。这样群里转发的 IP 和聊天里的「重测」都能在 1 分钟内开始处理。
 - 删除任务：`... -File .\agent\install-task.ps1 -Remove`
 - 日志在 `agent/logs/agent-yyyyMMdd.log`。
 - 电脑关机期间不会测，开机后的下一轮会自动补上。
@@ -187,15 +195,40 @@ https://github.com/xiaokuixing/cfdata-results/blob/main/results.txt
 | `telegramTokenFile` | bot token 文件，默认 `%USERPROFILE%\.cfdata-results\bot-token.txt` |
 | `telegramProxy` | 可选，手动指定发 Telegram 的代理，例如 `http://127.0.0.1:7890` |
 
-网络说明：
+网络说明（汇报怎么送到你手机）：
 
-- `api.telegram.org` 国内直连不通。agent 会依次尝试：`telegramProxy` → `HTTPS_PROXY` 等环境变量 → 系统代理 → Clash / FlClash / mihomo 等进程监听的端口 → 常用端口（7890、7891、7897、10808、10809…），最后才试直连。
-- 找到可用通道后会记在 `agent/telegram-route.txt`，下一轮直接复用，省掉探测时间。
-- 全都不通时汇报不会丢，会存进 `agent/pending-reports/`，下一轮（10 分钟后）自动补发，最多保留 20 条。
-- 所以：测速那会儿代理开着就能立刻收到；没开的那轮，等你开代理后会补上。
+1. 优先走 Worker：agent 把汇报 POST 到 Cloudflare Worker 的 `/notify`，由 Worker 调 Telegram。代理开着时几乎立刻到。
+2. Worker 连不上（例如国内直连不上 `workers.dev`）：agent 把汇报写进仓库的 `agent/report-queue.json`（走 `api.github.com`，国内可直连）。
+3. Worker 的 Cron 每 2 分钟检查一次队列，有内容就转发给你并清空队列。最坏多等 2 分钟，**不需要本机开代理**。
+4. 以上都失败才会落到 `agent/pending-reports/`，下一轮补发，最多保留 20 条。
 
-单轮最长运行 `timeoutMinutes`（默认 90 分钟），超时会被强制结束并记一条 ⚠️ 汇报。计划任务每 10 分钟触发一次，上一轮没跑完时这一轮直接跳过。
+- `/notify` 用 `NOTIFY_SECRET` 鉴权；`/flush` 只会发给 `ALLOWED_USER_IDS` 里的 chat，不会被别人拿来做转发器。
+- 测速本身始终直连，和代理无关（Go 写的 cfdata 不读 Windows 系统代理）。
+
+单轮最长运行 `timeoutMinutes`（默认 90 分钟），超时会被强制结束并记一条 ⚠️ 汇报。计划任务每 1 分钟触发一次，上一轮没跑完时这一轮直接跳过。
 ## 8. 重测指定 IP
+
+### 8.1 在 Telegram 里直接发（推荐）
+
+私聊 bot，把「重测」和 IP 放在同一条消息里，格式随意：
+
+```
+重测
+162.159.160.28:443
+104.16.148.10 443
+１７２.64.79.24：2096
+```
+
+- 关键词：`重测`、`重新测`、`retest`、`/retest`，放在消息任意位置都行
+- IP 支持 `ip:端口`、`ip 端口`、`[IPv6]:端口`、中文全角标点，一次最多 200 个
+- bot 先回一条「已收到 N 个 IP，进入测速队列」
+- 本机 agent 每分钟取一次请求，测完把完整的测速汇报发回这个聊天（就是第 7 节那种格式，含每个 IP 的速度排名）
+- 非 CF 网段会提示「大概率会在链路复验被淘汰」
+- 消息里同时有别的内容也没关系，只提取 IP；含「重测」的消息不会被写进 `shared-ips.txt`
+
+> 本机没开机 / 没网时，请求会留在 `agent/retest-request.json` 里，开机后下一轮自动跑。
+
+### 8.2 本机手动重测
 
 想单独重测几个 IP（不改 `shared-ips.txt`）：
 
@@ -230,7 +263,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File D:\cfdata\cfdata-agent\agent
 
 - **bot 不回消息**：先访问 Worker 地址，返回 `cfdata telegram inbox worker` 说明 Worker 正常；再检查 webhook 是否指向正确地址、`WEBHOOK_SECRET` 是否和 `setWebhook` 一致。
 - **回复「未配置 ALLOWED_USER_IDS」**：环境变量没生效，或 user id 填错。
-- **回复「没找到可用 IP」**：消息里没有 `ip:端口`，或 IP 不在 Cloudflare 官方网段（`CF_ONLY=false` 可关闭过滤）。
+- **回复「没找到可用 IP」**：消息里没有 `ip:端口`，或格式/端口不合法。非 CF 网段的 IP 会写进 `shared-ips-other.txt`，不参与测速。
 - **cfdata 拉不到 sourceUrl**：`raw.githubusercontent.com` 需要匿名可访问，仓库必须是 public；国内访问不稳时把 `sourceUrl` 换成镜像地址，或在 `proxy` 里填本地代理。
 - **agent 日志显示 401/403**：token 过期、没给 Contents 写权限，或 token 文件路径不对。
 - **agent 日志显示 `[config]`**：cfdata 第一次运行会在 exe 目录生成配置文件并退出，脚本会自动重试一次；如果仍失败，手动跑一次 cfdata 让它生成配置即可。
@@ -245,7 +278,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File D:\cfdata\cfdata-agent\agent
 | `shared-ips-other.txt` | bot 收集到的非 CF 网段 IP，只存不测 |
 | `results.txt` | 每次 cfdata 测速后覆盖写入的合格结果 |
 | `pool.txt` | 历史累积池（你正在用的文件） |
-| `worker/worker.js` | Telegram → GitHub 收集端 |
+| `agent/retest-request.json` | Telegram 重测请求，处理完会标记 `status: done` |
+| `agent/report-queue.json` | 汇报队列，Worker 定时转发后清空 |
+| `worker/worker.js` | Telegram → GitHub 收集端 + 汇报转发 |
 | `agent/agent.ps1` | 本地增量测速 |
 | `agent/agent.config.example.json` | 参数模板 |
 | `agent/install-task.ps1` | 注册/删除计划任务 |
