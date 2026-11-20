@@ -129,6 +129,7 @@ powershell -ExecutionPolicy Bypass -File .\agent\install-task.ps1 -Minutes 1
 - 删除任务：`... -File .\agent\install-task.ps1 -Remove`
 - 日志在 `agent/logs/agent-yyyyMMdd.log`。
 - 电脑关机期间不会测，开机后的下一轮会自动补上。
+- 任务用 `wscript.exe` 调 `run-agent.vbs`（窗口样式 0）启动，cfdata 子进程也是隐藏窗口，**不会闪黑色控制台**。
 
 ## 6. 测速条件
 
@@ -143,7 +144,10 @@ powershell -ExecutionPolicy Bypass -File .\agent\install-task.ps1 -Minutes 1
 | `resultLimit` | `-nsbresultlimit` | 进入测速阶段的最大条数，默认 200 |
 | `delay` | `-nsbdelay` | 延迟门槛（毫秒），默认 350，0 = 不筛 |
 | `tls` | `-nsbtls` | 目标端口是否按 TLS 访问，默认 true |
-| `relink` | `-relink` | 链路复验，默认 true |
+| `relink` | `-relink` | 链路复验，默认 **false**（关闭） |
+| `relinkHost` | `-relinkhost` | 链路复验探针域名，默认 `probe.609909.xyz`，只在 `relink=true` 时生效 |
+
+> **关于链路复验**：cfdata 的 `-relink` 会先对每个 IP 做 TCP+TLS+HTTP 探测，并要求探针域名返回带 `cfdata` 标记的 JSON。探针服务一变动（响应变了、被墙、临时故障），整批 IP 都会被判成「链路不通」而直接丢弃。本方案默认关闭它：所有 IP 都进入真实测速，报告里逐个给出速度或失败原因，不会再出现整批被吞的情况。想恢复过滤就把 `relink` 改成 `true`。
 
 另外：
 
@@ -269,6 +273,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File D:\cfdata\cfdata-agent\agent
 - **agent 日志显示 `[config]`**：cfdata 第一次运行会在 exe 目录生成配置文件并退出，脚本会自动重试一次；如果仍失败，手动跑一次 cfdata 让它生成配置即可。
 - **cfdata 报 `flag provided but not defined`**：本地 cfdata 版本太旧，升级到最新 Release 再试（需要支持 `-nsbsourceurl`、`-github`、`-skipgeo`）。
 - **cfdata 上传了但 pool 没变**：检查 Action 是否成功、`results.txt` 是否真的被覆盖；只有合格结果才会被上传。
+- **整批 IP 都「链路不通」**：把 `params.relink` 设为 `false`（本方案默认已关）。relink 依赖第三方探针 `probe.609909.xyz`，探针异常时会误杀全部候选。
+- **每分钟闪黑窗口**：确认计划任务的动作是 `wscript.exe //B //Nologo "D:\cfdata\cfdata-agent\run-agent.vbs"`，而不是直接跑 `powershell.exe`；重新执行一次 `install-task.ps1` 即可修复。
 
 ## 10. 文件说明
 
