@@ -436,6 +436,20 @@ try {
     $tail = @($output -split "`r?`n" | Where-Object { $_.Trim() -ne '' } | Select-Object -Last 12)
     foreach ($line in $tail) { Write-Log ("cfdata | " + $line) }
 
+    $speedRows = @()
+    foreach ($sm in [regex]::Matches($output, '(?m)^\[speed\]\s*(?:\[\d*/\d*\]\s*)?(\S+)\s+(.+?)\s*$')) {
+        $addr = $sm.Groups[1].Value
+        $speedText = $sm.Groups[2].Value.Trim()
+        $speedValue = $null
+        $vm = [regex]::Match($speedText, '([0-9]+(?:\.[0-9]+)?)\s*MB/s')
+        if ($vm.Success) { $speedValue = [double]$vm.Groups[1].Value }
+        if ($speedText.Length -gt 40) { $speedText = $speedText.Substring(0, 40) + '…' }
+        $speedRows += [pscustomobject]@{ Addr = $addr; Text = $speedText; MB = $speedValue }
+    }
+    if ($speedRows.Count -gt 1) {
+        $speedRows = @($speedRows | Sort-Object -Property @{ Expression = { if ($null -eq $_.MB) { -1 } else { $_.MB } }; Descending = $true })
+    }
+
     $summaryInput = $lines.Count
     $summaryRelink = $lines.Count
     $summarySpeed = 0
@@ -455,12 +469,6 @@ try {
     $summaryUploaded = $uploadMatch.Success
 
     if ($notify -and $telegramChatId -and (Test-Path -LiteralPath $telegramTokenFile)) {
-        $topLines = @()
-        $resultFile = Join-Path $tempDir 'cfdata-run.txt'
-        if (Test-Path -LiteralPath $resultFile) {
-            $topLines = @(Get-Content -LiteralPath $resultFile -Encoding UTF8 | Where-Object { $_.Trim() -ne '' } | Select-Object -First 5)
-        }
-
         $pDelay = Get-Num $params 'delay' 0
         $pSpeedMin = Get-Num $params 'speedMin' 0.1
         $pSpeedThreads = Get-Num $params 'speedThreads' 0
@@ -485,19 +493,31 @@ try {
             } else {
                 $msg += ('合格 {0} 个 · 但上传未确认，请查看日志' -f $summaryRows)
             }
-            $msg += ('耗时 ' + $durationText)
-            $msg += ''
-            $msg += ('https://github.com/{0}/blob/{1}/{2}' -f $repo, $branch, $uploadPath)
-            if ($topLines.Count -gt 0) {
-                $msg += ''
-                $msg += $topLines
-            }
         } else {
             $msg += '合格 0 个 · 未上传（本轮没有达到门槛的 IP）'
-            $msg += ('耗时 ' + $durationText)
         }
+        $msg += ('耗时 ' + $durationText)
+
+        if ($speedRows.Count -gt 0) {
+            $msg += ''
+            $listLimit = 60
+            foreach ($row in ($speedRows | Select-Object -First $listLimit)) {
+                $mark = '❌'
+                if ($null -ne $row.MB -and [double]$row.MB -ge [double]$pSpeedMin) { $mark = '✅' }
+                $msg += ('{0} {1} — {2}' -f $mark, $row.Addr, $row.Text)
+            }
+            if ($speedRows.Count -gt $listLimit) {
+                $msg += ('… 另有 {0} 个未列出' -f ($speedRows.Count - $listLimit))
+            }
+        }
+
+        if ($summaryRows -gt 0 -and $summaryUploaded) {
+            $msg += ''
+            $msg += ('https://github.com/{0}/blob/{1}/{2}' -f $repo, $branch, $uploadPath)
+        }
+
         $msgText = ($msg -join "`n")
-        if ($msgText.Length -gt 3500) { $msgText = $msgText.Substring(0, 3500) }
+        if ($msgText.Length -gt 4000) { $msgText = $msgText.Substring(0, 4000) }
         if (Send-Report $msgText) {
             Write-Log '已发送 Telegram 通知'
         } else {
