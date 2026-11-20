@@ -1,0 +1,21 @@
+{
+  "repo": "xiaokuixing/cfdata-results",
+  "branch": "main",
+  "inboxPath": "shared-ips.txt",
+  "uploadPath": "results.txt",
+  "cfdataExe": "C:\\Tools\\cfdata\\cfdata-windows-amd64.exe",
+  "tokenFile": "%USERPROFILE%\\.cfdata-results\\gh-token.txt",
+  "proxy": "",
+  "sourceUrl": "",
+  "timeoutMinutes": 30,
+  "params": {
+    "threads": 100,
+    "speedThreads": 1,
+    "speedMin": 8.0,
+    "speedLimit": 10,
+    "resultLimit": 500,
+    "delay": 0,
+    "tls": true,
+    "relink": true
+  }
+}
