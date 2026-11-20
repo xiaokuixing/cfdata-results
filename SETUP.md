@@ -57,6 +57,7 @@ Set-Content "$env:USERPROFILE\.cfdata-results\gh-token.txt" "github_pat_xxxxxxxx
 | `GH_BRANCH` | Text | 可省略，默认 `main` |
 | `CF_ONLY` | Text | 可省略，默认 `true`（只收 Cloudflare 官方网段） |
 | `DEFAULT_PORTS` | Text | 可省略，默认 `443`（消息里没写端口时用） |
+| `MAX_LINES` | Text | 可省略，默认 `200`（`shared-ips.txt` 只保留最新这么多条） |
 
 4. 记下 Worker 地址，例如 `https://cfdata-inbox.xxx.workers.dev`。
 5. 注册 webhook：
@@ -123,9 +124,9 @@ powershell -ExecutionPolicy Bypass -File .\agent\install-task.ps1 -Minutes 10
 | `threads` | `-nsbthreads` | 延迟扫描并发，默认 100 |
 | `speedThreads` | `-nsbspeedtest` | 测速线程，1 最准；0 表示不测速 |
 | `speedMin` | `-nsbspeedmin` | 合格门槛，MB/s，默认 10 |
-| `speedLimit` | `-nsbspeedlimit` | 凑够多少个合格结果就停，默认 10 |
-| `resultLimit` | `-nsbresultlimit` | 进入测速阶段的最大条数，默认 500 |
-| `delay` | `-nsbdelay` | 延迟门槛（毫秒），0 = 不筛 |
+| `speedLimit` | `-nsbspeedlimit` | 测速结果数量上限，凑够就停，默认 100 |
+| `resultLimit` | `-nsbresultlimit` | 进入测速阶段的最大条数，默认 200 |
+| `delay` | `-nsbdelay` | 延迟门槛（毫秒），默认 350，0 = 不筛 |
 | `tls` | `-nsbtls` | 目标端口是否按 TLS 访问，默认 true |
 | `relink` | `-relink` | 链路复验，默认 true |
 
@@ -140,9 +141,47 @@ powershell -ExecutionPolicy Bypass -File .\agent\install-task.ps1 -Minutes 10
 
 cfdata 网页模式里的设置只影响网页手动运行，不会同步给计划任务；要改自动任务的条件，就改这个文件。
 
-`shared-ips.txt` 会一直增长，旧 IP 排在后面。积累到几百条后建议手动清一次（保留最近需要的部分），否则每轮延迟扫描会越来越慢。
+`shared-ips.txt` 由 Worker 自动裁剪，只保留最新 `MAX_LINES` 条（默认 200），新 IP 在前；想留更多就把 Worker 的 `MAX_LINES` 调大。这样每轮耗时可控。
 
-## 7. 排错
+## 7. 测速汇报
+
+每轮测速结束后，agent 会用 bot 私聊你一条汇总：
+
+```
+📊 本轮测速完成 · 11-20 22:09
+条件：延迟 ≤ 350ms · 速度 ≥ 10MB/s · 并发 1
+
+来源 2 个 → 链路可用 2 个 → 实际测速 2 个
+合格 1 个 · 已上传 1 个到 results.txt
+耗时 38 秒
+
+https://github.com/xiaokuixing/cfdata-results/blob/main/results.txt
+162.159.160.28:443#HKG-13.26MB/s-Asia Pacific
+```
+
+- 来源：`shared-ips.txt` 的行数
+- 链路可用：通过 relink 复验的条数
+- 实际测速：真正进入测速阶段的条数
+- 合格 / 已上传：达到门槛并被写进 `results.txt` 的条数；0 个时 cfdata 不会上传，消息里会写「未上传」
+
+相关配置：
+
+| 字段 | 说明 |
+| --- | --- |
+| `notify` | 默认 `true`；设成 `false` 就不发汇报 |
+| `telegramChatId` | 你的 user id |
+| `telegramTokenFile` | bot token 文件，默认 `%USERPROFILE%\.cfdata-results\bot-token.txt` |
+| `telegramProxy` | 可选，手动指定发 Telegram 的代理，例如 `http://127.0.0.1:7890` |
+
+网络说明：
+
+- `api.telegram.org` 国内直连不通。agent 会依次尝试：`telegramProxy` → `HTTPS_PROXY` 等环境变量 → 系统代理 → Clash / FlClash / mihomo 等进程监听的端口 → 常用端口（7890、7891、7897、10808、10809…），最后才试直连。
+- 找到可用通道后会记在 `agent/telegram-route.txt`，下一轮直接复用，省掉探测时间。
+- 全都不通时汇报不会丢，会存进 `agent/pending-reports/`，下一轮（10 分钟后）自动补发，最多保留 20 条。
+- 所以：测速那会儿代理开着就能立刻收到；没开的那轮，等你开代理后会补上。
+
+单轮最长运行 `timeoutMinutes`（默认 90 分钟），超时会被强制结束并记一条 ⚠️ 汇报。计划任务每 10 分钟触发一次，上一轮没跑完时这一轮直接跳过。
+## 8. 排错
 
 - **bot 不回消息**：先访问 Worker 地址，返回 `cfdata telegram inbox worker` 说明 Worker 正常；再检查 webhook 是否指向正确地址、`WEBHOOK_SECRET` 是否和 `setWebhook` 一致。
 - **回复「未配置 ALLOWED_USER_IDS」**：环境变量没生效，或 user id 填错。
@@ -153,7 +192,7 @@ cfdata 网页模式里的设置只影响网页手动运行，不会同步给计�
 - **cfdata 报 `flag provided but not defined`**：本地 cfdata 版本太旧，升级到最新 Release 再试（需要支持 `-nsbsourceurl`、`-github`、`-skipgeo`）。
 - **cfdata 上传了但 pool 没变**：检查 Action 是否成功、`results.txt` 是否真的被覆盖；只有合格结果才会被上传。
 
-## 8. 文件说明
+## 9. 文件说明
 
 | 文件 | 作用 |
 | --- | --- |
