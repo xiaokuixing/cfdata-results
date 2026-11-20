@@ -91,6 +91,138 @@ function Get-ContentHash {
     }
 }
 
+function Get-LocalProxyCandidates {
+    $result = New-Object System.Collections.Generic.List[string]
+    $seen = @{}
+    $names = @('clash-core-service', 'FlClashCore', 'FlClash', 'mihomo', 'clash-verge', 'verge-mihomo', 'clash', 'sing-box', 'nekoray', 'v2rayN', 'xray')
+
+    $push = {
+        param([string]$Value, $Seen, $List)
+        if (-not $Value) { return }
+        $Value = $Value.Trim()
+        if (-not $Value) { return }
+        if ($Value -notmatch '^[a-zA-Z][a-zA-Z0-9+.-]*://') { $Value = 'http://' + $Value }
+        if (-not $Seen.ContainsKey($Value)) {
+            $Seen[$Value] = $true
+            $List.Add($Value)
+        }
+    }
+
+    if ($script:telegramProxy) { & $push $script:telegramProxy $seen $result }
+    & $push $env:HTTPS_PROXY $seen $result
+    & $push $env:HTTP_PROXY $seen $result
+    & $push $env:ALL_PROXY $seen $result
+
+    try {
+        $ie = Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings' -ErrorAction Stop
+        if ($ie.ProxyEnable -eq 1 -and $ie.ProxyServer) {
+            foreach ($part in ([string]$ie.ProxyServer -split ';')) {
+                & $push ($part -replace '^[^=]*=', '') $seen $result
+            }
+        }
+    } catch { }
+
+    $commonPorts = @(7890, 7891, 7892, 7897, 7899, 1080, 10808, 10809, 2080, 8889, 20171)
+    $listenPorts = @(Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty LocalPort)
+    foreach ($port in $commonPorts) {
+        if ($listenPorts -contains $port) { & $push ('http://127.0.0.1:' + $port) $seen $result }
+    }
+    $pids = @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $names -contains $_.ProcessName } | Select-Object -ExpandProperty Id)
+    if ($pids.Count -gt 0) {
+        $conns = @(Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object { $pids -contains $_.OwningProcess })
+        foreach ($conn in $conns) {
+            if ($conn.LocalAddress -in @('127.0.0.1', '0.0.0.0', '::1', '::')) {
+                & $push ('http://127.0.0.1:' + $conn.LocalPort) $seen $result
+            }
+        }
+    }
+    return $result
+}
+
+function Send-TelegramMessage {
+    param([string]$Token, [string]$ChatId, [string]$Text, [string[]]$ProxyList)
+    $body = @{ chat_id = $ChatId; text = $Text; disable_web_page_preview = $true } | ConvertTo-Json -Depth 3
+    $bytes = [Text.Encoding]::UTF8.GetBytes($body)
+    $uri = "https://api.telegram.org/bot$Token/sendMessage"
+
+    $routeCache = Join-Path $script:scriptDir 'telegram-route.txt'
+    $routes = New-Object System.Collections.Generic.List[string]
+    $seen = @{}
+    $addRoute = {
+        param([string]$Value, $Seen, $List)
+        if ($null -eq $Value) { return }
+        if (-not $Seen.ContainsKey($Value)) { $Seen[$Value] = $true; $List.Add($Value) }
+    }
+    if (Test-Path -LiteralPath $routeCache) {
+        $cached = (Get-Content -LiteralPath $routeCache -Raw).Trim()
+        if ($cached) { & $addRoute $cached $seen $routes }
+    }
+    foreach ($item in @($ProxyList)) { if ($item) { & $addRoute $item $seen $routes } }
+    if (-not $seen.ContainsKey('')) { $seen[''] = $true; $routes.Add('') }
+
+    $lastError = ''
+    foreach ($route in $routes) {
+        try {
+            $req = @{
+                Uri = $uri
+                Method = 'Post'
+                ContentType = 'application/json; charset=utf-8'
+                Body = $bytes
+                TimeoutSec = 8
+            }
+            if ($route) { $req['Proxy'] = $route }
+            Invoke-RestMethod @req | Out-Null
+            [IO.File]::WriteAllText($routeCache, $route, (New-Object Text.UTF8Encoding($false)))
+            if ($route) { Write-Log "Telegram 通知已发送（经代理 $route）" }
+            else { Write-Log 'Telegram 通知已发送（直连）' }
+            return $true
+        } catch {
+            $lastError = $_.Exception.Message
+        }
+    }
+    Write-Log ("Telegram 通知发送失败：" + $lastError)
+    return $false
+}
+
+function Send-Report {
+    param([string]$Text)
+    if (-not $telegramChatId) { return $false }
+    if (-not (Test-Path -LiteralPath $telegramTokenFile)) { return $false }
+    $token = (Get-Content -LiteralPath $telegramTokenFile -Raw).Trim()
+    return Send-TelegramMessage -Token $token -ChatId $telegramChatId -Text $Text -ProxyList (Get-LocalProxyCandidates)
+}
+
+function Save-PendingReport {
+    param([string]$Text)
+    $dir = Join-Path $script:scriptDir 'pending-reports'
+    if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
+    $name = 'report-{0}.txt' -f (Get-Date -Format 'yyyyMMdd-HHmmss')
+    $existing = @(Get-ChildItem -LiteralPath $dir -Filter 'report-*.txt' -ErrorAction SilentlyContinue | Sort-Object Name)
+    if ($existing.Count -gt 20) {
+        $existing | Select-Object -First ($existing.Count - 20) | ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue }
+    }
+    [IO.File]::WriteAllText((Join-Path $dir $name), $Text, (New-Object Text.UTF8Encoding($false)))
+    Write-Log ('汇报已暂存：' + $name)
+}
+
+function Send-PendingReports {
+    $dir = Join-Path $script:scriptDir 'pending-reports'
+    if (-not (Test-Path -LiteralPath $dir)) { return }
+    $files = @(Get-ChildItem -LiteralPath $dir -Filter 'report-*.txt' -ErrorAction SilentlyContinue | Sort-Object Name | Select-Object -First 5)
+    if ($files.Count -eq 0) { return }
+    Write-Log ('有 {0} 条历史汇报待补发' -f $files.Count)
+    foreach ($file in $files) {
+        $text = Get-Content -LiteralPath $file.FullName -Raw -Encoding UTF8
+        if (Send-Report $text) {
+            Remove-Item -LiteralPath $file.FullName -Force -ErrorAction SilentlyContinue
+            Write-Log ('补发成功：' + $file.Name)
+        } else {
+            Write-Log '补发失败，保留到下一轮'
+            return
+        }
+    }
+}
+
 if (-not (Test-Path -LiteralPath $Config)) {
     throw "找不到配置文件：$Config（先复制 agent.config.example.json 为 agent.config.json 再修改）"
 }
@@ -111,6 +243,10 @@ if (-not $sourceUrl) {
     $sourceUrl = "https://raw.githubusercontent.com/$repo/$branch/$inboxPath"
 }
 
+$notify = (Get-Str $cfg 'notify' 'true').ToLowerInvariant() -ne 'false'
+$telegramTokenFile = [Environment]::ExpandEnvironmentVariables((Get-Str $cfg 'telegramTokenFile' '%USERPROFILE%\.cfdata-results\bot-token.txt'))
+$telegramChatId = Get-Str $cfg 'telegramChatId' ''
+$telegramProxy = Get-Str $cfg 'telegramProxy' ''
 $params = Get-RawValue $cfg 'params'
 
 $argList = New-Object 'System.Collections.Generic.List[string]'
@@ -183,6 +319,8 @@ if (-not $mutex.WaitOne(0)) {
     Write-Log '上一轮还在运行，跳过本轮'
     exit 0
 }
+if ($notify) { Send-PendingReports }
+
 
 $tempDir = Join-Path $env:TEMP ('cfdata-agent-' + [guid]::NewGuid().ToString('N'))
 $stateFile = Join-Path $scriptDir 'state.json'
@@ -252,6 +390,7 @@ try {
     $quoted = Quote-Args $runList
     $arguments = ($quoted -join ' ')
 
+    $runStart = Get-Date
     $attempt = 0
     $output = ''
     $cfdataExit = 0
@@ -296,6 +435,75 @@ try {
 
     $tail = @($output -split "`r?`n" | Where-Object { $_.Trim() -ne '' } | Select-Object -Last 12)
     foreach ($line in $tail) { Write-Log ("cfdata | " + $line) }
+
+    $summaryInput = $lines.Count
+    $summaryRelink = $lines.Count
+    $summarySpeed = 0
+    $summaryRows = 0
+    $m = [regex]::Match($output, '输入\s*\d+\s*条记录[，,]\s*解析为\s*(\d+)\s*个地址')
+    if ($m.Success) { $summaryInput = [int]$m.Groups[1].Value }
+    $m = [regex]::Match($output, '链路复验完成：可用\s*(\d+)')
+    if ($m.Success) { $summaryRelink = [int]$m.Groups[1].Value }
+    $m = [regex]::Match($output, '开始测速：(\d+)\s*条记录')
+    if ($m.Success) { $summarySpeed = [int]$m.Groups[1].Value }
+
+    $rowMatches = [regex]::Matches($output, 'cfdata-run\.txt\s*\((\d+)\s*rows')
+    if ($rowMatches.Count -gt 0) {
+        $summaryRows = [int]$rowMatches[$rowMatches.Count - 1].Groups[1].Value
+    }
+    $uploadMatch = [regex]::Match($output, '\[github\]\s+uploaded\s+(\S+)')
+    $summaryUploaded = $uploadMatch.Success
+
+    if ($notify -and $telegramChatId -and (Test-Path -LiteralPath $telegramTokenFile)) {
+        $topLines = @()
+        $resultFile = Join-Path $tempDir 'cfdata-run.txt'
+        if (Test-Path -LiteralPath $resultFile) {
+            $topLines = @(Get-Content -LiteralPath $resultFile -Encoding UTF8 | Where-Object { $_.Trim() -ne '' } | Select-Object -First 5)
+        }
+
+        $pDelay = Get-Num $params 'delay' 0
+        $pSpeedMin = Get-Num $params 'speedMin' 0.1
+        $pSpeedThreads = Get-Num $params 'speedThreads' 0
+        $elapsed = (Get-Date) - $runStart
+        if ($elapsed.TotalMinutes -ge 1) {
+            $durationText = '{0} 分 {1} 秒' -f [int][math]::Floor($elapsed.TotalMinutes), $elapsed.Seconds
+        } else {
+            $durationText = '{0} 秒' -f [int]$elapsed.TotalSeconds
+        }
+
+        $msg = @()
+        if ($cfdataExit -ne 0) { $msg += ('⚠️ cfdata 异常退出，退出码 {0}' -f $cfdataExit) }
+        $msg += ('📊 本轮测速完成 · ' + (Get-Date -Format 'MM-dd HH:mm'))
+        $msg += ('条件：延迟 ≤ {0}ms · 速度 ≥ {1}MB/s · 并发 {2}' -f (Format-Number $pDelay), (Format-Number $pSpeedMin), $pSpeedThreads)
+        $msg += ''
+        $msg += ('来源 {0} 个 → 链路可用 {1} 个 → 实际测速 {2} 个' -f $summaryInput, $summaryRelink, $summarySpeed)
+        if ($output -match '链路复验后未发现可用 IP') {
+            $msg += '链路复验后没有可用 IP（来源当前不通），未进入测速。'
+        } elseif ($summaryRows -gt 0) {
+            if ($summaryUploaded) {
+                $msg += ('合格 {0} 个 · 已上传 {0} 个到 {1}' -f $summaryRows, $uploadPath)
+            } else {
+                $msg += ('合格 {0} 个 · 但上传未确认，请查看日志' -f $summaryRows)
+            }
+            $msg += ('耗时 ' + $durationText)
+            $msg += ''
+            $msg += ('https://github.com/{0}/blob/{1}/{2}' -f $repo, $branch, $uploadPath)
+            if ($topLines.Count -gt 0) {
+                $msg += ''
+                $msg += $topLines
+            }
+        } else {
+            $msg += '合格 0 个 · 未上传（本轮没有达到门槛的 IP）'
+            $msg += ('耗时 ' + $durationText)
+        }
+        $msgText = ($msg -join "`n")
+        if ($msgText.Length -gt 3500) { $msgText = $msgText.Substring(0, 3500) }
+        if (Send-Report $msgText) {
+            Write-Log '已发送 Telegram 通知'
+        } else {
+            Save-PendingReport $msgText
+        }
+    }
 
     if ($cfdataExit -ne 0) {
         Write-Log "cfdata 退出码 $cfdataExit，本轮不记录来源状态"
