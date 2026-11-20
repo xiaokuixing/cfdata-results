@@ -99,6 +99,13 @@ function isValidPort(port) {
   return Number.isInteger(port) && port > 0 && port <= 65535;
 }
 
+function normalizeText(text) {
+  return text
+    .normalize("NFKC")
+    .replace(/[\u200b-\u200d\ufeff]/g, " ")
+    .replace(/<[^>\n]{0,60}>/g, " ");
+}
+
 function extractFromLine(line, defaultPorts) {
   const found = [];
 
@@ -107,6 +114,31 @@ function extractFromLine(line, defaultPorts) {
     if (v6ToBigInt(host) === null) continue;
     const port = match[2] ? Number(match[2]) : defaultPorts[0];
     if (isValidPort(port)) found.push({ host, port, v6: true });
+  }
+
+  for (const match of line.matchAll(/[0-9A-Fa-f:]{3,}/g)) {
+    const token = match[0];
+    const before = line[match.index - 1] || "";
+    const after = line[match.index + token.length] || "";
+    if (before === "[" || /[0-9A-Za-z]/.test(before) || /[0-9A-Za-z]/.test(after)) continue;
+    if ((token.match(/:/g) || []).length < 2) continue;
+    if (v6ToBigInt(token) === null) continue;
+
+    const rest = line.slice(match.index + token.length);
+    const portMatch = /^[\s,;|/]+(\d{1,5})(?![\d.])/.exec(rest);
+    let port = null;
+    if (portMatch) {
+      const candidate = Number(portMatch[1]);
+      if (candidate >= 100 || candidate === 80) port = candidate;
+    }
+
+    if (port === null) {
+      for (const fallback of defaultPorts) {
+        if (isValidPort(fallback)) found.push({ host: token, port: fallback, v6: true });
+      }
+    } else if (isValidPort(port)) {
+      found.push({ host: token, port, v6: true });
+    }
   }
 
   for (const match of line.matchAll(/(?<![\d.])(\d{1,3}(?:\.\d{1,3}){3})(?![\d.])/g)) {
@@ -120,7 +152,7 @@ function extractFromLine(line, defaultPorts) {
     if (colonPort) {
       port = Number(colonPort[1]);
     } else {
-      const spacePort = /^[\s,;|]+(\d{1,5})(?![\d.])/.exec(rest);
+      const spacePort = /^[\s,;|/]+(\d{1,5})(?![\d.])/.exec(rest);
       if (spacePort) {
         const candidate = Number(spacePort[1]);
         if (candidate >= 100 || candidate === 80) port = candidate;
@@ -138,7 +170,6 @@ function extractFromLine(line, defaultPorts) {
 
   return found;
 }
-
 function endpointKey(endpoint) {
   return `${endpoint.host.toLowerCase()}|${endpoint.port}`;
 }
@@ -153,7 +184,7 @@ function extractEndpoints(text, defaultPorts = [443]) {
   const ports = defaultPorts.length ? defaultPorts : [443];
   const unique = new Map();
 
-  for (const rawLine of text.replace(/\u200b/g, " ").split(/\r?\n/)) {
+  for (const rawLine of normalizeText(text).split(/\r?\n/)) {
     for (const endpoint of extractFromLine(rawLine, ports)) {
       const key = endpointKey(endpoint);
       if (!unique.has(key)) unique.set(key, endpoint);

@@ -6,7 +6,7 @@
 
 ```
 TG 转发 → Worker → shared-ips.txt
-                        │  raw 地址作为 -nsbsourceurl
+                        │  GitHub API 下载后以 -nsbfile 交给 cfdata
                         ▼
             本地 cfdata 非标优选（条件见第 6 节）
                         │  cfdata -github 上传
@@ -122,7 +122,7 @@ powershell -ExecutionPolicy Bypass -File .\agent\install-task.ps1 -Minutes 10
 | --- | --- | --- |
 | `threads` | `-nsbthreads` | 延迟扫描并发，默认 100 |
 | `speedThreads` | `-nsbspeedtest` | 测速线程，1 最准；0 表示不测速 |
-| `speedMin` | `-nsbspeedmin` | 合格门槛，MB/s，默认 8 |
+| `speedMin` | `-nsbspeedmin` | 合格门槛，MB/s，默认 10 |
 | `speedLimit` | `-nsbspeedlimit` | 凑够多少个合格结果就停，默认 10 |
 | `resultLimit` | `-nsbresultlimit` | 进入测速阶段的最大条数，默认 500 |
 | `delay` | `-nsbdelay` | 延迟门槛（毫秒），0 = 不筛 |
@@ -131,7 +131,8 @@ powershell -ExecutionPolicy Bypass -File .\agent\install-task.ps1 -Minutes 10
 
 另外：
 
-- `sourceUrl`：留空则自动用 `https://raw.githubusercontent.com/<repo>/<branch>/<inboxPath>`；raw 访问不了时可以换成镜像地址。
+- `sourceMode`：默认 `api`，通过 `api.github.com` 取文件（国内比 raw 稳），下载后以 `-nsbfile` 交给 cfdata；改成 `url` 才会用 `-nsbsourceurl` 直接拉 raw。
+- `sourceUrl`：只在 `sourceMode=url` 时生效，留空则自动用 `https://raw.githubusercontent.com/<repo>/<branch>/<inboxPath>`。
 - `proxy`：只影响 cfdata 的管理面请求（下载、上传等），扫描测速仍然直连。留空则用系统代理环境变量。
 - 想完全不筛、把测到的全传上去：把 `outqualified` 对应的导出改成 all —— 目前固定为 `qualified`，需要改 `agent.ps1` 里这一行。
 

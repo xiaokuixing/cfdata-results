@@ -1,10 +1,11 @@
 ﻿#Requires -Version 5.1
 <#
     本地测速 agent
-    检测 shared-ips.txt 是否有更新，有更新就调用本地 cfdata 做非标优选，
-    筛选条件与上传全部交给 cfdata 自己完成（-nsbsourceurl + -github）。
+    检测 shared-ips.txt 是否有变化，有变化就调用本地 cfdata 做非标优选，
+    筛选条件与上传全部交给 cfdata 自己完成。
 
-    由 Windows 计划任务每隔 N 分钟调用一次，单次执行完即退出。
+    来源默认走 GitHub API（api.github.com，国内通常比 raw 稳定），
+    下载后以 -nsbfile 交给 cfdata；sourceMode=url 时退回 -nsbsourceurl。
 #>
 [CmdletBinding()]
 param(
@@ -73,9 +74,20 @@ function Add-BoolArg {
 }
 
 function Quote-Args {
-    param([System.Collections.Generic.List[string]]$List)
+    param($List)
     return $List | ForEach-Object {
         if ($_ -match '[\s"]') { '"' + ($_ -replace '"', '\"') + '"' } else { $_ }
+    }
+}
+
+function Get-ContentHash {
+    param([string]$Text)
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try {
+        $bytes = [Text.Encoding]::UTF8.GetBytes($Text)
+        return [BitConverter]::ToString($sha.ComputeHash($bytes)).Replace('-', '')
+    } finally {
+        $sha.Dispose()
     }
 }
 
@@ -89,6 +101,7 @@ $repo = Get-Str $cfg 'repo' 'xiaokuixing/cfdata-results'
 $branch = Get-Str $cfg 'branch' 'main'
 $inboxPath = Get-Str $cfg 'inboxPath' 'shared-ips.txt'
 $uploadPath = Get-Str $cfg 'uploadPath' 'results.txt'
+$sourceMode = (Get-Str $cfg 'sourceMode' 'api').ToLowerInvariant()
 $exe = [Environment]::ExpandEnvironmentVariables((Get-Str $cfg 'cfdataExe' ''))
 $tokenFile = [Environment]::ExpandEnvironmentVariables((Get-Str $cfg 'tokenFile' '%USERPROFILE%\.cfdata-results\gh-token.txt'))
 $timeoutMinutes = [int](Get-Num $cfg 'timeoutMinutes' 30)
@@ -103,7 +116,6 @@ $params = Get-RawValue $cfg 'params'
 $argList = New-Object 'System.Collections.Generic.List[string]'
 $argList.Add('-cli')
 Add-Arg $argList '-mode' 'nsb'
-Add-Arg $argList '-nsbsourceurl' $sourceUrl
 Add-Arg $argList '-nsbthreads' (Get-Num $params 'threads' 100)
 Add-Arg $argList '-nsbspeedtest' (Get-Num $params 'speedThreads' 1)
 Add-Arg $argList '-nsbspeedmin' (Format-Number (Get-Num $params 'speedMin' 8.0))
@@ -136,12 +148,24 @@ Add-Arg $argList '-ghmessage' 'update results from shared inbox'
 if ($SelfTest) {
     Write-Host "配置:      $Config"
     Write-Host "cfdata:    $exe"
-    Write-Host "来源:      $sourceUrl"
+    if ($sourceMode -eq 'api') {
+        Write-Host "来源:      GitHub API / $repo / $branch / $inboxPath"
+    } else {
+        Write-Host "来源:      $sourceUrl"
+    }
     Write-Host "上传到:    $repo / $branch / $uploadPath"
     Write-Host "token:     $tokenFile"
     Write-Host ""
-    Write-Host "命令:"
-    Write-Host ("  `"$exe`" " + ((Quote-Args $argList) -join ' '))
+    Write-Host "命令（运行时会把来源下载到临时文件）："
+    $preview = @($argList)
+    if ($sourceMode -eq 'api') {
+        $preview += '-nsbfile'
+        $preview += '<temp>\source-ips.txt'
+    } else {
+        $preview += '-nsbsourceurl'
+        $preview += $sourceUrl
+    }
+    Write-Host ("  `"$exe`" " + ((Quote-Args $preview) -join ' '))
     exit 0
 }
 
@@ -151,6 +175,8 @@ if (-not (Test-Path -LiteralPath $exe)) {
 if (-not (Test-Path -LiteralPath $tokenFile)) {
     throw "GitHub token 文件不存在：$tokenFile"
 }
+
+$token = (Get-Content -LiteralPath $tokenFile -Raw).Trim()
 
 $mutex = New-Object System.Threading.Mutex($false, 'Local\cfdata-tg-agent')
 if (-not $mutex.WaitOne(0)) {
@@ -163,39 +189,67 @@ $stateFile = Join-Path $scriptDir 'state.json'
 $exitCode = 0
 
 try {
-    $headers = @{}
-    $state = $null
-    if (Test-Path -LiteralPath $stateFile) {
-        try { $state = Get-Content -LiteralPath $stateFile -Raw -Encoding UTF8 | ConvertFrom-Json } catch { $state = $null }
+    if ($sourceMode -eq 'api') {
+        $uri = "https://api.github.com/repos/$repo/contents/${inboxPath}?ref=${branch}"
+        $headers = @{
+            Authorization = "Bearer $token"
+            Accept = 'application/vnd.github.raw'
+            'User-Agent' = 'cfdata-agent'
+        }
+    } else {
+        $uri = $sourceUrl
+        $headers = @{ 'User-Agent' = 'cfdata-agent' }
     }
-    $etag = Get-RawValue $state 'etag'
-    if (-not $Force -and $etag) { $headers['If-None-Match'] = [string]$etag }
 
-    Write-Log "检查来源：$sourceUrl"
+    Write-Log "检查来源：$uri"
+    $content = ''
     try {
-        $response = Invoke-WebRequest -Uri $sourceUrl -Headers $headers -UseBasicParsing -TimeoutSec 30
+        $content = Invoke-RestMethod -Uri $uri -Headers $headers -Method Get -TimeoutSec 60
     } catch {
         $status = $null
         if ($_.Exception.Response) { $status = [int]$_.Exception.Response.StatusCode }
-        if ($status -eq 304) {
-            Write-Log '来源没有更新，跳过'
-            exit 0
+        if ($status -eq 404) {
+            $content = ''
+        } else {
+            throw "下载来源失败（$status）：$($_.Exception.Message)"
         }
-        throw "下载来源失败（$status）：$($_.Exception.Message)"
     }
+    if ($null -eq $content) { $content = '' }
+    $content = ([string]$content).Replace("`r`n", "`n")
 
-    $newEtag = $null
-    if ($response.Headers -and $response.Headers['ETag']) { $newEtag = [string]$response.Headers['ETag'] }
-
-    $lines = @($response.Content -split "`r?`n" | Where-Object { $_.Trim() -ne '' -and -not $_.Trim().StartsWith('#') })
+    $lines = @($content -split "`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' -and -not $_.StartsWith('#') })
     if ($lines.Count -eq 0) {
         Write-Log '来源文件为空，跳过'
         exit 0
     }
+
+    $hash = Get-ContentHash ($lines -join "`n")
+    $state = $null
+    if (Test-Path -LiteralPath $stateFile) {
+        try { $state = Get-Content -LiteralPath $stateFile -Raw -Encoding UTF8 | ConvertFrom-Json } catch { $state = $null }
+    }
+    $lastHash = Get-RawValue $state 'hash'
+    if (-not $Force -and $lastHash -eq $hash) {
+        Write-Log '来源没有变化，跳过'
+        exit 0
+    }
+
     Write-Log ("来源共 {0} 条，开始调用 cfdata" -f $lines.Count)
 
     New-Item -ItemType Directory -Force -Path $tempDir | Out-Null
-    $quoted = Quote-Args $argList
+    $runList = New-Object 'System.Collections.Generic.List[string]'
+    $runList.AddRange($argList)
+    if ($sourceMode -eq 'api') {
+        $sourceFile = Join-Path $tempDir 'source-ips.txt'
+        [IO.File]::WriteAllText($sourceFile, (($lines -join "`n") + "`n"), (New-Object Text.UTF8Encoding($false)))
+        $runList.Add('-nsbfile')
+        $runList.Add($sourceFile)
+    } else {
+        $runList.Add('-nsbsourceurl')
+        $runList.Add($sourceUrl)
+    }
+
+    $quoted = Quote-Args $runList
     $arguments = ($quoted -join ' ')
 
     $attempt = 0
@@ -244,13 +298,11 @@ try {
     foreach ($line in $tail) { Write-Log ("cfdata | " + $line) }
 
     if ($cfdataExit -ne 0) {
-        Write-Log "cfdata 退出码 $cfdataExit，本轮不记录更新状态"
+        Write-Log "cfdata 退出码 $cfdataExit，本轮不记录来源状态"
         $exitCode = 1
     } else {
-        if ($newEtag) {
-            $stateObject = [ordered]@{ etag = $newEtag; lastRun = (Get-Date).ToString('s'); source = $sourceUrl }
-            [IO.File]::WriteAllText($stateFile, ($stateObject | ConvertTo-Json), (New-Object Text.UTF8Encoding($false)))
-        }
+        $stateObject = [ordered]@{ hash = $hash; lastRun = (Get-Date).ToString('s'); source = $uri }
+        [IO.File]::WriteAllText($stateFile, ($stateObject | ConvertTo-Json), (New-Object Text.UTF8Encoding($false)))
         Write-Log '本轮完成'
     }
 } catch {
