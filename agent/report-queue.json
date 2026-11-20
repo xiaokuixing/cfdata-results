@@ -1,4 +1,10 @@
 {
-  "items": [],
-  "updatedAt": "2026-11-20T15:38:50.165Z"
+    "items":  [
+                  {
+                      "id":  "8ac676ad8a194790975652f97a1b80d5",
+                      "chatId":  "8176265509",
+                      "text":  "🔁 重测完成（来自 Telegram）· 11-20 23:44\n条件：延迟 ≤ 350ms · 速度 ≥ 10MB/s · 并发 1\n\n来源 3 个 → 链路可用 3 个 → 实际测速 3 个\n合格 1 个 · 已上传 1 个到 results.txt\n耗时 51 秒\n\n✅ 162.159.160.28:443 — 19.61MB/s\n❌ 104.16.148.10:443 — 2.54MB/s\n❌ 172.67.66.177:443 — 0.71MB/s\n\nhttps://github.com/xiaokuixing/cfdata-results/blob/main/results.txt",
+                      "at":  "2026-11-20T23:45:07"
+                  }
+              ]
 }
