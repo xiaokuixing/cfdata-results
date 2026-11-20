@@ -1,12 +1,1 @@
-{
-  "id": "manualtest-mwp4devq",
-  "createdAt": "2026-11-20T15:14:03.542Z",
-  "chatId": 8176265509,
-  "messageId": 0,
-  "userId": 8176265509,
-  "endpoints": [
-    "162.159.160.28:443",
-    "104.18.41.26:443"
-  ],
-  "rawText": "manual end-to-end test"
-}
+{"id":"manualtest-mwp4devq","status":"done","doneAt":"2026-11-20T23:15:18"}
